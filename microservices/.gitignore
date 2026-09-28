@@ -1,0 +1,13 @@
+# Secrets
+.env
+
+# Runtime logs (bind-mounted from each service's own folder)
+service-a/logs/*.log
+service-b/logs/*.log
+service-c/logs/*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
