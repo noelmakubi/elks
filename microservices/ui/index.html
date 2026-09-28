@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Microservices Dashboard</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<header>
+  <h1>Microservices Dashboard</h1>
+  <div class="controls">
+    <label>Refresh (ms) <input id="interval" type="number" min="1000" step="1000" value="5000" /></label>
+    <label>Log lines <input id="lines" type="number" min="10" step="10" value="50" /></label>
+    <label><input id="autorefresh" type="checkbox" checked /> Auto-refresh</label>
+    <button id="refreshNow">Refresh now</button>
+  </div>
+</header>
+
+<section class="health">
+  <h2>Service health</h2>
+  <div id="healthGrid" class="grid health-grid"></div>
+</section>
+
+<section>
+  <h2>service-a &mdash; Users</h2>
+  <div class="cols">
+    <div class="card">
+      <h3>Create user</h3>
+      <form id="userForm">
+        <input name="name" placeholder="Name" required />
+        <input name="email" type="email" placeholder="Email" required />
+        <button type="submit">Create user</button>
+      </form>
+      <p class="result" id="userResult"></p>
+    </div>
+    <div class="card">
+      <h3>Users</h3>
+      <div class="scroll" id="usersList"></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>service-b &mdash; Orders</h2>
+  <div class="cols">
+    <div class="card">
+      <h3>Create order</h3>
+      <form id="orderForm">
+        <input name="user_id" type="number" placeholder="user_id" required />
+        <input name="item" placeholder="Item" required />
+        <input name="quantity" type="number" min="1" value="1" />
+        <button type="submit">Create order</button>
+      </form>
+      <p class="result" id="orderResult"></p>
+    </div>
+    <div class="card">
+      <h3>Orders</h3>
+      <div class="scroll" id="ordersList"></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>service-c &mdash; Notifications</h2>
+  <div class="card">
+    <div class="scroll" id="notificationsList"></div>
+  </div>
+</section>
+
+<section>
+  <h2>Live logs</h2>
+  <div class="grid log-grid" id="logGrid"></div>
+</section>
+
+<footer>Logs are served by each service's <code>GET /logs?lines=N</code> endpoint.</footer>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
