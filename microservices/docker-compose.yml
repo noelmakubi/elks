@@ -1,0 +1,160 @@
+# Microservices stack: 3 independently deployable services, one PostgreSQL
+# database per service (Database-per-Service), and a static dashboard.
+#
+# All secrets come from environment variables (see .env.example -> .env).
+# Ports are published as-is: service-a=5001, service-b=5002, service-c=5003, ui=8080.
+
+services:
+
+  # ---------------------------------------------------------------- UI ----
+  ui:
+    build: ./ui
+    container_name: ui
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+
+  # --------------------------------------------------------- service-a ----
+  service-a:
+    build: ./service-a
+    container_name: service-a
+    restart: unless-stopped
+    ports:
+      - "5001:5001"
+    environment:
+      SERVICE_NAME: service-a
+      LOG_DIR: /var/log/service-a
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DB_HOST: service-a-db
+      DB_PORT: "5432"
+      DB_NAME: ${SERVICE_A_DB_NAME:-service_a}
+      DB_USER: ${SERVICE_A_DB_USER:-service_a_user}
+      DB_PASSWORD: ${SERVICE_A_DB_PASSWORD:?set SERVICE_A_DB_PASSWORD in .env}
+    volumes:
+      # Logs stay inside this service's own folder on the host.
+      - ./service-a/logs:/var/log/service-a
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request;urllib.request.urlopen('http://localhost:5001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      - service-a-db
+
+  service-a-db:
+    image: postgres:16-alpine
+    container_name: service-a-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${SERVICE_A_DB_NAME:-service_a}
+      POSTGRES_USER: ${SERVICE_A_DB_USER:-service_a_user}
+      POSTGRES_PASSWORD: ${SERVICE_A_DB_PASSWORD:?set SERVICE_A_DB_PASSWORD in .env}
+    volumes:
+      - service_a_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SERVICE_A_DB_USER:-service_a_user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --------------------------------------------------------- service-b ----
+  service-b:
+    build: ./service-b
+    container_name: service-b
+    restart: unless-stopped
+    ports:
+      - "5002:5002"
+    environment:
+      SERVICE_NAME: service-b
+      LOG_DIR: /var/log/service-b
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DB_HOST: service-b-db
+      DB_PORT: "5432"
+      DB_NAME: ${SERVICE_B_DB_NAME:-service_b}
+      DB_USER: ${SERVICE_B_DB_USER:-service_b_user}
+      DB_PASSWORD: ${SERVICE_B_DB_PASSWORD:?set SERVICE_B_DB_PASSWORD in .env}
+      # Inter-service call. A failure here degrades, it does not stop startup.
+      SERVICE_A_URL: http://service-a:5001
+      SERVICE_A_TIMEOUT: "3"
+      REQUIRE_USER_VALIDATION: ${REQUIRE_USER_VALIDATION:-false}
+    volumes:
+      - ./service-b/logs:/var/log/service-b
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request;urllib.request.urlopen('http://localhost:5002/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      - service-b-db
+
+  service-b-db:
+    image: postgres:16-alpine
+    container_name: service-b-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${SERVICE_B_DB_NAME:-service_b}
+      POSTGRES_USER: ${SERVICE_B_DB_USER:-service_b_user}
+      POSTGRES_PASSWORD: ${SERVICE_B_DB_PASSWORD:?set SERVICE_B_DB_PASSWORD in .env}
+    volumes:
+      - service_b_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SERVICE_B_DB_USER:-service_b_user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --------------------------------------------------------- service-c ----
+  service-c:
+    build: ./service-c
+    container_name: service-c
+    restart: unless-stopped
+    ports:
+      - "5003:5003"
+    environment:
+      SERVICE_NAME: service-c
+      LOG_DIR: /var/log/service-c
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DB_HOST: service-c-db
+      DB_PORT: "5432"
+      DB_NAME: ${SERVICE_C_DB_NAME:-service_c}
+      DB_USER: ${SERVICE_C_DB_USER:-service_c_user}
+      DB_PASSWORD: ${SERVICE_C_DB_PASSWORD:?set SERVICE_C_DB_PASSWORD in .env}
+      SERVICE_B_URL: http://service-b:5002
+      SERVICE_B_TIMEOUT: "3"
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-15}
+    volumes:
+      - ./service-c/logs:/var/log/service-c
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request;urllib.request.urlopen('http://localhost:5003/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      - service-c-db
+
+  service-c-db:
+    image: postgres:16-alpine
+    container_name: service-c-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${SERVICE_C_DB_NAME:-service_c}
+      POSTGRES_USER: ${SERVICE_C_DB_USER:-service_c_user}
+      POSTGRES_PASSWORD: ${SERVICE_C_DB_PASSWORD:?set SERVICE_C_DB_PASSWORD in .env}
+    volumes:
+      - service_c_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SERVICE_C_DB_USER:-service_c_user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  service_a_data:
+  service_b_data:
+  service_c_data:
