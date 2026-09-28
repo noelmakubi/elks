@@ -1,0 +1,321 @@
+# Production overlay for the elks stack.
+#
+# Usage on the server:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# What changes vs the dev compose:
+#   * The API ports are not published. The dashboard's nginx is the only
+#     container that binds a host port, and it reverse-proxies /api/* to the
+#     services over the internal network.
+#   * The app containers run with a read-only root filesystem, dropped
+#     capabilities and no privilege escalation.
+#   * Docker's json-file log driver is capped so a chatty service cannot fill
+#     the disk.
+#   * Postgres gets tuned modestly for a 2 vCPU box and a slower restart.
+#   * An internal-only network replaces the default bridge.
+#
+# Secrets still come from the environment (a .env file on the server, gitignored).
+# Nothing here is a credential.
+
+name: elks
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# Applied to the Flask services only. NOT to postgres: the postgres entrypoint
+# starts as root to chown its data directory and then drops privileges via
+# gosu, so `cap_drop: ALL` makes initdb fail with a permission error.
+x-app-hardening: &app-hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  read_only: true
+  tmpfs:
+    - /tmp:uid=1000,gid=1000,mode=1770
+
+# Common to the three Flask services. `init: true` gives us a real PID 1 that
+# reaps zombies, so gunicorn workers exit cleanly on restart.
+#
+# The hardening keys are merged in HERE, once, rather than into each service.
+# A mapping may only have a single `<<` key, so repeating `<<: *app-common`
+# and `<<: *app-hardening` on one service is a YAML parse error.
+x-app-common: &app-common
+  <<: *app-hardening
+  restart: unless-stopped
+  init: true
+  logging: *default-logging
+  networks:
+    - elks
+
+# Common to the three Postgres containers. `read_only` and `cap_drop` are
+# deliberately absent here; see x-app-hardening above.
+x-db-common: &db-common
+  restart: unless-stopped
+  logging: *default-logging
+  networks:
+    - elks
+
+services:
+
+  # ---------------------------------------------------------------- UI ----
+  # The only container that binds a host port. In front of this sits the host's
+  # own nginx (see hosting/nginx) which terminates TLS on 443, if you add one.
+  ui:
+    build:
+      context: ./ui
+    container_name: elks-ui
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+    networks:
+      - elks
+    # `!override` replaces the dev list (8080:8080) instead of appending to it.
+    # Appending would bind host port 8080 twice and the container would refuse
+    # to start. The tag goes on the list, not on the item.
+    ports: !override
+      # Bound to loopback on purpose: reachable from the host nginx, not from
+      # the internet. Set UI_BIND=0.0.0.0 to publish the dashboard directly
+      # (only acceptable behind a security group / firewall that limits 8080).
+      - "${UI_BIND:-127.0.0.1}:${UI_PORT:-8080}:8080"
+    environment:
+      NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx
+    volumes:
+      # nginx needs to write its pid and temp files. These live on tmpfs so the
+      # read-only-ish container still works without touching the image layer.
+      - nginx-cache:/var/cache/nginx
+      - nginx-run:/var/run
+      - nginx-tmp:/tmp
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ------------------------------------------------------- service-a ----
+  service-a:
+    <<: *app-common
+    build:
+      context: ./service-a
+      target: runtime
+    image: elks/service-a:${IMAGE_TAG:-local}
+    container_name: elks-service-a
+    # The overlay MERGES lists, it does not replace them. Without this reset the
+    # `ports: ["5001:5001"]` inherited from docker-compose.yml would still be in
+    # force and would publish the API straight to the internet, bypassing the
+    # nginx proxy, its CSP and its rate limit. `!reset` empties the list first.
+    ports: !reset []
+    # No ports: reachable only through the ui proxy on the internal network.
+    environment:
+      SERVICE_NAME: service-a
+      LOG_DIR: /var/log/service-a
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PORT: "5001"
+      DB_HOST: service-a-db
+      DB_PORT: "5432"
+      DB_NAME: ${SERVICE_A_DB_NAME:-service_a}
+      DB_USER: ${SERVICE_A_DB_USER:-service_a_user}
+      DB_PASSWORD: ${SERVICE_A_DB_PASSWORD:?set SERVICE_A_DB_PASSWORD in .env}
+      # Cap threads to keep memory predictable on a small instance.
+      GUNICORN_THREADS: ${GUNICORN_THREADS:-8}
+    volumes:
+      - ./service-a/logs:/var/log/service-a
+    depends_on:
+      service-a-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  service-a-db:
+    <<: *db-common
+    image: postgres:16-alpine
+    container_name: elks-service-a-db
+    environment:
+      POSTGRES_DB: ${SERVICE_A_DB_NAME:-service_a}
+      POSTGRES_USER: ${SERVICE_A_DB_USER:-service_a_user}
+      POSTGRES_PASSWORD: ${SERVICE_A_DB_PASSWORD:?set SERVICE_A_DB_PASSWORD in .env}
+      # Small shared memory for parallel query; avoids the docker default of
+      # 64m being too small for the planner on this workload.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    command:
+      - postgres
+      - -c
+      - max_connections=50
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - effective_cache_size=384MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - log_min_duration_statement=1000
+      - -c
+      - log_checkpoints=on
+    volumes:
+      - service_a_data:/var/lib/postgresql/data
+    shm_size: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SERVICE_A_DB_USER:-service_a_user} -d ${SERVICE_A_DB_NAME:-service_a}"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ------------------------------------------------------- service-b ----
+  service-b:
+    <<: *app-common
+    build:
+      context: ./service-b
+      target: runtime
+    image: elks/service-b:${IMAGE_TAG:-local}
+    container_name: elks-service-b
+    ports: !reset []
+    environment:
+      SERVICE_NAME: service-b
+      LOG_DIR: /var/log/service-b
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PORT: "5002"
+      DB_HOST: service-b-db
+      DB_PORT: "5432"
+      DB_NAME: ${SERVICE_B_DB_NAME:-service_b}
+      DB_USER: ${SERVICE_B_DB_USER:-service_b_user}
+      DB_PASSWORD: ${SERVICE_B_DB_PASSWORD:?set SERVICE_B_DB_PASSWORD in .env}
+      SERVICE_A_URL: http://service-a:5001
+      SERVICE_A_TIMEOUT: "3"
+      REQUIRE_USER_VALIDATION: ${REQUIRE_USER_VALIDATION:-false}
+      GUNICORN_THREADS: ${GUNICORN_THREADS:-8}
+    volumes:
+      - ./service-b/logs:/var/log/service-b
+    depends_on:
+      service-b-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5002/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  service-b-db:
+    <<: *db-common
+    image: postgres:16-alpine
+    container_name: elks-service-b-db
+    environment:
+      POSTGRES_DB: ${SERVICE_B_DB_NAME:-service_b}
+      POSTGRES_USER: ${SERVICE_B_DB_USER:-service_b_user}
+      POSTGRES_PASSWORD: ${SERVICE_B_DB_PASSWORD:?set SERVICE_B_DB_PASSWORD in .env}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    command:
+      - postgres
+      - -c
+      - max_connections=50
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - effective_cache_size=384MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - log_min_duration_statement=1000
+      - -c
+      - log_checkpoints=on
+    volumes:
+      - service_b_data:/var/lib/postgresql/data
+    shm_size: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SERVICE_B_DB_USER:-service_b_user} -d ${SERVICE_B_DB_NAME:-service_b}"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ------------------------------------------------------- service-c ----
+  service-c:
+    <<: *app-common
+    build:
+      context: ./service-c
+      target: runtime
+    image: elks/service-c:${IMAGE_TAG:-local}
+    container_name: elks-service-c
+    ports: !reset []
+    environment:
+      SERVICE_NAME: service-c
+      LOG_DIR: /var/log/service-c
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PORT: "5003"
+      DB_HOST: service-c-db
+      DB_PORT: "5432"
+      DB_NAME: ${SERVICE_C_DB_NAME:-service_c}
+      DB_USER: ${SERVICE_C_DB_USER:-service_c_user}
+      DB_PASSWORD: ${SERVICE_C_DB_PASSWORD:?set SERVICE_C_DB_PASSWORD in .env}
+      SERVICE_B_URL: http://service-b:5002
+      SERVICE_B_TIMEOUT: "3"
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-15}
+      GUNICORN_THREADS: ${GUNICORN_THREADS:-8}
+    volumes:
+      - ./service-c/logs:/var/log/service-c
+    depends_on:
+      service-c-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5003/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  service-c-db:
+    <<: *db-common
+    image: postgres:16-alpine
+    container_name: elks-service-c-db
+    environment:
+      POSTGRES_DB: ${SERVICE_C_DB_NAME:-service_c}
+      POSTGRES_USER: ${SERVICE_C_DB_USER:-service_c_user}
+      POSTGRES_PASSWORD: ${SERVICE_C_DB_PASSWORD:?set SERVICE_C_DB_PASSWORD in .env}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    command:
+      - postgres
+      - -c
+      - max_connections=50
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - effective_cache_size=384MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - log_min_duration_statement=1000
+      - -c
+      - log_checkpoints=on
+    volumes:
+      - service_c_data:/var/lib/postgresql/data
+    shm_size: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SERVICE_C_DB_USER:-service_c_user} -d ${SERVICE_C_DB_NAME:-service_c}"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+networks:
+  elks:
+    driver: bridge
+    # Not marked internal: the containers must be able to reach the internet
+    # for pip/apt during a build and for DNS. Only the published ports are the
+    # exposure that matters, and only the ui publishes one.
+
+volumes:
+  service_a_data:
+  service_b_data:
+  service_c_data:
+  nginx-cache:
+  nginx-run:
+  nginx-tmp:

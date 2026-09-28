@@ -275,15 +275,33 @@ def logs():
     )
 
 
-if __name__ == "__main__":
+def start_background_tasks():
+    """
+    Start the schema-init thread.
+
+    Called at import time, not under `if __name__ == "__main__"`, because the
+    production entrypoint is gunicorn (`app:app`) and that block would never
+    run. Guarded so a second import in the same process cannot double-start it.
+    """
+    global _tasks_started
+    if _tasks_started:
+        return
+    _tasks_started = True
+
     log_event(
         "INFO",
         "service_startup",
         "service-a starting up",
-        port=5001,
+        port=os.getenv("PORT", "5001"),
         db_host=DB_HOST,
         log_level=os.getenv("LOG_LEVEL", "INFO"),
     )
     threading.Thread(target=init_db, name="db-init", daemon=True).start()
-    # Threaded server so request handling and the init thread coexist.
-    app.run(host="0.0.0.0", port=5001, threaded=True)
+
+
+_tasks_started = False
+start_background_tasks()
+
+if __name__ == "__main__":
+    # Local development only; production runs gunicorn from the Dockerfile.
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5001")), threaded=True)

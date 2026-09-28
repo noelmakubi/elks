@@ -1,0 +1,19 @@
+# Keep the build context small and never bake secrets or logs into the image.
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+*.log
+logs/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+tests/
+README.md
+Dockerfile
+.dockerignore

@@ -1,1 +1,23 @@
-microservices/service-a/logs/.gitkeep
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local env files (the committed example stays)
+.env
+.env.*
+!.env.example
+
+# Deployment state and local overrides
+microservices/.deployed-commit
+microservices/.env.previous

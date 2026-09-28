@@ -366,16 +366,40 @@ def logs():
     )
 
 
-if __name__ == "__main__":
+def start_background_tasks():
+    """
+    Start the schema-init thread and the service-b poller.
+
+    Called at import time, not under `if __name__ == "__main__"`, because the
+    production entrypoint is gunicorn (`app:app`) and that block would never
+    run. Two guards matter here:
+      * _tasks_started stops a repeat import from starting a second poller in
+        the same process.
+      * run with a single gunicorn worker, as the Dockerfile does. A second
+        worker is a second process and would poll independently.
+    processed_orders keeps duplicate notifications out of the database even so.
+    """
+    global _tasks_started
+    if _tasks_started:
+        return
+    _tasks_started = True
+
     log_event(
         "INFO",
         "service_startup",
         "service-c starting up",
-        port=5003,
+        port=os.getenv("PORT", "5003"),
         db_host=DB_HOST,
         service_b_url=SERVICE_B_URL,
         poll_interval_seconds=POLL_INTERVAL_SECONDS,
     )
     threading.Thread(target=init_db, name="db-init", daemon=True).start()
     threading.Thread(target=poll_service_b_forever, name="poller", daemon=True).start()
-    app.run(host="0.0.0.0", port=5003, threaded=True)
+
+
+_tasks_started = False
+start_background_tasks()
+
+if __name__ == "__main__":
+    # Local development only; production runs gunicorn from the Dockerfile.
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5003")), threaded=True)

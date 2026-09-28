@@ -44,7 +44,9 @@ docker compose up -d --build
 docker compose ps
 ```
 
-Open <http://localhost:8080>.
+Open <http://localhost:8080>. The dashboard's nginx also reverse-proxies the
+API, so the browser only ever calls one origin. The services are still published
+on 5001-5003 for direct `curl` access while developing.
 
 Tear down (add `-v` to also delete the database volumes):
 
@@ -211,22 +213,47 @@ docker compose up -d --build service-a service-a-db
 
 ## Dashboard
 
-`ui/` is plain HTML/CSS/JS — no build step, no Node. nginx serves it; the browser
-calls each service's API directly, which is why CORS is enabled on all three.
+`ui/` is plain HTML/CSS/JS — no build step, no Node. Its nginx serves the static
+files *and* reverse-proxies `/api/service-a|b|c/*` to the matching service, so
+the browser talks to a single origin. In production this is what keeps the API
+ports off the internet entirely.
 
-If your services are on different host ports, edit the `baseUrl` values in
-`ui/config.js` and rebuild the UI.
+`ui/config.js` picks the endpoint style: relative `/api/...` paths by default
+(the proxy), or absolute `localhost:500x` URLs when `ELKS_API_MODE` is set to
+`direct`. CORS is still enabled on all three services, which is what makes the
+direct mode — and any other client — work.
+
+## Production and CI/CD
+
+`hosting/` holds everything needed to run this on an EC2 instance, and
+`.github/workflows/` holds the pipeline. **See
+[hosting/README.md](hosting/README.md) for the full walkthrough.**
+
+| Path | What it is |
+| --- | --- |
+| `microservices/docker-compose.prod.yml` | Production overlay: no published API ports, gunicorn, read-only rootfs, dropped capabilities, capped logs, tuned Postgres |
+| `hosting/bootstrap.sh` | One-time server setup: Docker, sysctl, swap, logrotate, nginx, ufw, unattended-upgrades |
+| `hosting/deploy.sh` | Build, recreate, wait for health, smoke-test through the proxy |
+| `hosting/rollback.sh` | Redeploy the previous commit, or restore the previous `.env` |
+| `hosting/certbot.sh` | ACME TLS certificate and renewal timer |
+| `hosting/backup.sh` | `pg_dump` each database, prune, and restore |
+| `hosting/smoke-test.sh` | End-to-end test: user → order → notification |
+| `.github/workflows/ci.yml` | ruff, byte-compile, nginx and compose validation, smoke test, `pip-audit`, Trivy, push to GHCR |
+| `.github/workflows/cd.yml` | SSH to the host, check out the sha CI tested, deploy, verify from outside |
 
 ## Project layout
 
 ```
 .
-├── docker-compose.yml
+├── docker-compose.yml        # dev: services published on 5001-5003, ui on 8080
+├── docker-compose.prod.yml   # production overlay
 ├── .env.example
 ├── service-a/   app.py  logging_utils.py  Dockerfile  requirements.txt  logs/app.log
 ├── service-b/   app.py  logging_utils.py  Dockerfile  requirements.txt  logs/app.log
 ├── service-c/   app.py  logging_utils.py  Dockerfile  requirements.txt  logs/app.log
-└── ui/          index.html  style.css  app.js  config.js  Dockerfile
+├── ui/          index.html  style.css  app.js  config.js  nginx.conf  Dockerfile
+├── hosting/     bootstrap.sh  deploy.sh  rollback.sh  certbot.sh  backup.sh  smoke-test.sh
+└── .github/workflows/  ci.yml  cd.yml
 ```
 
 `logging_utils.py` is identical in all three services and copied, not shared, so no

@@ -1,13 +1,22 @@
 # Secrets
 .env
+.env.*
+!.env.example
 
 # Runtime logs (bind-mounted from each service's own folder)
 service-a/logs/*.log
 service-b/logs/*.log
 service-c/logs/*.log
 
+# Local deployment state written by hosting/deploy.sh
+.deployed-commit
+.env.previous
+
 # Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
